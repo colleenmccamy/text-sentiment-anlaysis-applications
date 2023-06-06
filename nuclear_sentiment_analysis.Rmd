@@ -1,0 +1,341 @@
+---
+title: "Assignment 5"
+author: "Colleen McCamy"
+date: "2023-05-18"
+output: 
+  pdf_document:
+    highlight: zenburn
+    latex_engine: xelatex
+---
+
+```{r packages, include = FALSE}
+library(tidytext)
+library(tidyverse)
+library(widyr)
+library(irlba) 
+library(broom) 
+library(textdata)
+library(ggplot2)
+library(dplyr)
+library(treemapify)
+
+```
+
+
+
+#### Train Your Own Embeddings
+
+```{r data, results = FALSE}
+
+# reading in the data
+nuclear_df <- read_csv("/Users/colleenmccamy/Documents/MEDS/classes/spring/eds-231-text-analysis/text-sentiment-assignments/data/nuclear_articles_df.csv")
+
+```
+
+
+```{r unigrams, results = FALSE}
+
+# calculating the unigram probabilities
+unigram_probs <- nuclear_df |> 
+  unnest_tokens(word, Article) |> 
+  anti_join(stop_words, by = 'word') |> 
+  count(word, sort = 1) |> # creates an n column
+  mutate(p = n / sum(n)) # probability of word
+
+```
+
+
+```{r make-skipgrams, results = FALSE}
+
+# Define a custom function to remove numbers
+remove_numbers <- function(text) {
+  gsub("\\b\\d+\\b", "", text)
+}
+
+skipgrams <- nuclear_df |> 
+  mutate(Article = remove_numbers(Article)) |>
+  unnest_tokens(ngram, Article, 
+                token = "ngrams", # new mode for tokens
+                n = 5) |> 
+  mutate(ngramID = row_number()) |> 
+  tidyr::unite(skipgramID, ID, ngramID) |> # paste strings together in columns
+  unnest_tokens(word, ngram) |> # unnest five word sequences to word level
+  anti_join(stop_words, by = "word")
+
+```
+
+
+```{r pairwise_count, results = FALSE}
+
+#calculating probabilities with a pairwise count
+skipgram_probs <- skipgrams |> 
+  pairwise_count(word, skipgramID, diag = T, sort = T) |> 
+  mutate(p = n/sum(n))
+
+```
+
+
+```{r norm-prob, results = FALSE}
+
+# normalizing and filtering the top to reduce the data if it is occurring less than 20 times (since they would be not important)
+normalized_prob <- skipgram_probs |> 
+  filter(n > 20 ) |> 
+  rename(word1 = item1, 
+         word2 = item2) |> 
+  left_join(unigram_probs |> 
+              select(word1 = word, 
+                     p1 = p), 
+            by = "word1") |>  # joining probabilities 
+   left_join(unigram_probs |> 
+              select(word2 = word, 
+                     p2 = p), 
+            by = "word2") |> 
+  mutate(p_together = p/p1/p2)
+
+normalized_prob[5000:5010,]
+  
+```
+
+
+
+```{r pmi}
+
+# calculating word similarities by location in the n-dimension space
+pmi_matrix <- normalized_prob |> 
+  mutate(pmi = log10(p_together)) |> # log of probability to normalized
+  cast_sparse(word1, word2, pmi) # converting from tidyformat to a sparse matrix
+
+```
+
+
+```{r pmi2}
+
+# setting NAs to zero
+pmi_matrix@x[is.na(pmi_matrix@x)] <- 0
+
+# creating one matrix with ID values and two orthogonal matrices 
+pmi_svd <- irlba::irlba(pmi_matrix, 
+                        100,
+                        maxit = 500 # decides how to adjust estimates of singular values
+                        )
+
+# pulling the 'u' matrix with singular values from the orthogonal vectors to create the space to calculate semantic space / distances for meanings
+word_vectors <- pmi_svd$u 
+
+# combining the word paired with the probabilities
+rownames(word_vectors) <- rownames(pmi_matrix)
+
+```
+
+PART 2:
+Calculate and plot the 10 most semantically similar words for three key words
+
+```{r}
+
+# creating a search synonyms function
+search_synonyms <- function(word_vectors, selected_vector) {
+dat <- word_vectors %*% selected_vector
+    
+similarities <- dat |> 
+        tibble(token = rownames(dat), similarity = dat[,1])
+similarities |> 
+       arrange(-similarity) |> 
+        select(c(2,3))
+}
+
+# calculating similar synonyms
+utility <- search_synonyms(word_vectors, word_vectors["utility", ]) |> head(n = 10)
+climate <- search_synonyms(word_vectors, word_vectors["climate", ]) |> head(n = 10)
+waste <- search_synonyms(word_vectors, word_vectors["waste", ]) |> head(n = 10)
+
+# Creating treemaps
+waste_plot <- ggplot(waste, 
+                     aes(area = similarity, 
+                         fill = similarity, 
+                         label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Waste'")+
+  theme(legend.position = "none")
+
+climate_plot <- ggplot(climate, aes(area = similarity, fill = similarity, label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Climate'")
+
+
+utility_plot <- ggplot(utility, aes(area = similarity, fill = similarity, label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Utility'")+
+  theme(legend.position = "none")
+
+
+ggpubr::ggarrange(waste_plot, utility_plot, climate_plot, ncol = 2, nrow = 2)
+
+```
+
+PART 3: 
+Assembling word math equations
+
+```{r word-math}
+
+# waste with hazardous
+waste_hazard <- word_vectors["waste", ] + word_vectors["hazardous", ]
+search_synonyms(word_vectors, waste_hazard) |> head(n = 10) |> gt::gt()
+
+# waste without hazardous
+waste_nohazard <- word_vectors["waste", ] - word_vectors["hazardous", ]
+search_synonyms(word_vectors, waste_nohazard)  |> head(n = 10) |> gt::gt()
+
+# seeing government regulation
+gov_reg <- word_vectors["regulation", ] + word_vectors["government", ]
+search_synonyms(word_vectors, gov_reg)  |> head(n = 10) |> gt::gt()
+
+```
+
+
+
+#### Pretrained Embeddings
+
+PART 4: 
+Create a set of 100-dimensional GloVe word embeddings
+
+```{r, results = FALSE}
+
+#glove6b <- embedding_glove6b(dimensions = 100, 
+#                             options(timeout = 250))
+
+#write.csv(glove6b, "/Users/colleenmccamy/Documents/MEDS/classes/spring/eds-231-text-analysis/text-sentiment-assignments/data/glove6b.csv")
+
+glove6b <- read_csv("/Users/colleenmccamy/Documents/MEDS/classes/spring/eds-231-text-analysis/text-sentiment-assignments/data/glove6b.csv")
+
+glove6b <- glove6b[ , -1]
+
+# Assuming your dataframe is called 'df'
+selected_columns <- glove6b |> 
+  select(-token)  # Exclude the first column
+
+matrix_data <- as.matrix(selected_columns)  # Exclude the first column and convert to a matrix
+
+row_names <- glove6b$token  # Extract values from the first column
+
+rownames(matrix_data) <- row_names
+
+```
+
+PART 5: 
+Test  the cannonical word math equation on the GloVe embeddings: "berlin" - "germany" + "france" = ?
+
+```{r}
+
+# word math equation
+countries <- matrix_data["berlin", ] - matrix_data["germany", ] + matrix_data["france", ]
+
+search_synonyms(matrix_data, countries) |> head(n = 10)
+
+```
+
+
+PART 6: 
+Recreate parts 2 and 3 above using the the GloVe embeddings in place of the ones you trained. 
+
+```{r}
+
+# calculating similar synonyms
+utility_glove <- search_synonyms(matrix_data, 
+                                 matrix_data["utility", ]) |> 
+  head(n = 10)
+
+climate_glove <- search_synonyms(matrix_data, 
+                                 matrix_data["climate", ]) |> 
+  head(n = 10)
+
+waste_glove <- search_synonyms(matrix_data, 
+                               matrix_data["waste", ]) |> 
+  head(n = 10)
+
+# Creating treemaps
+waste_plot_glove <- ggplot(waste_glove, aes(area = similarity, fill = similarity, label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Waste'")+
+  theme(legend.position = "none")
+
+climate_plot_glove <- ggplot(climate_glove, aes(area = similarity, fill = similarity, label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Climate'")
+
+
+utility_plot_glove <- ggplot(utility_glove, aes(area = similarity, fill = similarity, label = token)) +
+  geom_treemap() +
+  geom_treemap_text(place = "centre", 
+                    grow = TRUE, 
+                    alpha = 0.6, 
+                    color = "white", 
+                    fontface = "bold") +
+  scale_fill_gradient(high = "#023047", low = "#8ecae6") +
+  theme_minimal() +
+  labs(title = "Top 10 Words Similar to 'Utility'")+
+  theme(legend.position = "none")
+
+
+ggpubr::ggarrange(waste_plot_glove, utility_plot_glove, climate_plot_glove, ncol = 2, nrow = 2)
+
+
+```
+
+RESPONSE:
+How do they compare? 
+These words are a lot more general and include additional topics. For instance when looking at waste it includes sewage as a top word when this doesn't apply as much in a nuclear context. It is also interesting to see utility as within the context as it appears to include phrases such as a utility vehicle. Overall, I think this helps to showcase the importance of understanding the corpus and context in which you are doing analyzing word sentiment as it will only be in the context of the data (or corpus).
+
+What are the implications for applications of these embeddings?
+In looking at the Glove data, it is important to acknowledge the implications of doing this analysis on the nuclear corpus from the articles. This text analysis will only carry and maybe even amplify biases present within the corpus. From looking at some of the sources, it appears that the nuclear corpus has a lot of government and technical articles. The sentiment analysis will only look at similarities within the context of the articles. This could leave out public opinion, communities and voices under represented within the corpus of text.
+
+```{r}
+
+# waste with hazardous
+waste_hazard_glove <- matrix_data["waste", ] + matrix_data["hazardous", ]
+search_synonyms(matrix_data, waste_hazard_glove) |> head(n = 10) |> gt::gt()
+
+# waste without hazardous
+waste_nohazard_glove <- matrix_data["waste", ] - matrix_data["hazardous", ]
+search_synonyms(matrix_data, waste_nohazard_glove)  |> head(n = 10) |> gt::gt()
+
+# seeing government regulation
+gov_reg_glove <- matrix_data["regulation", ] + matrix_data["government", ]
+search_synonyms(matrix_data, gov_reg_glove)  |> head(n = 10) |> gt::gt()
+
+```
+

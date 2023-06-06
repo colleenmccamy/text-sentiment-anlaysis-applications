@@ -1,0 +1,155 @@
+---
+title: "Assignment 4: Climbing Fatalty Predictions"
+author: "Colleen McCamy"
+date: "2023-05-02"
+output: 
+  pdf_document:
+    highlight: zenburn
+    latex_engine: xelatex
+---
+
+
+```{r packages, include = FALSE}
+library(tidytext)
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(discrim) # naive-bayes
+library(e1071)
+library(RTextTools)
+
+```
+
+This data set includes more possible predictors than the text alone, but for this model we will only use the text variable
+```{r data}
+urlfile ="https://raw.githubusercontent.com/MaRo406/EDS-231-text-sentiment/main/data/climbing_reports_model_dat.csv"
+incidents_df<-readr::read_csv(url(urlfile))
+```
+
+Now we'll split our data into training and test portions
+
+```{r split-data}
+set.seed(1234)
+incidents2class <- incidents_df %>%
+  mutate(fatal = factor(if_else(
+    is.na(Deadly) ,
+    "non-fatal", "fatal")))
+incidents_split <- initial_split(incidents2class, strata = fatal)
+incidents_train <- training(incidents_split)
+incidents_test <- testing(incidents_split)
+```
+
+
+
+```{r pre-process}
+
+# setting up the recipe & preprocessing the data
+recipe <- recipe(fatal ~ Text, data = incidents_train) |> 
+  step_tokenize(Text) |> 
+  step_tokenfilter(Text, max_tokens = 200) |> 
+  step_tfidf(Text) 
+
+```
+
+
+Create  tidymodels workflow to combine the modeling components
+```{r workflow}
+incidents_wf <- workflow() |> 
+  add_recipe(recipe)
+```
+
+
+```{r svm model}
+
+# selecting the svm model
+svm_spec <-   svm_rbf(cost = tune(), 
+                      rbf_sigma = tune()) |> 
+  set_mode("classification") |> #set modeling context
+  set_engine("kernlab")#method for fitting
+
+```
+
+Adding our model to the workflow and fit it to the training data
+```{r fit-model}
+
+
+
+
+# fitting our model to the training data
+svm_fit <- incidents_wf |> 
+  add_model(svm_spec) |> 
+  fit(data = incidents_train)
+
+```
+
+Running the model with cross validation data
+```{r}
+# creating 10 fold cross validation
+set.seed(363)
+incidents_folds <- vfold_cv(incidents_train)
+
+# establishing the workflow
+svm_wf <- workflow() |> 
+  add_recipe(recipe) |> 
+  add_model(svm_spec)
+
+# making sure we are saving the data
+controls <- control_resamples(save_pred = TRUE)
+
+# fitting the resamples to the data
+svm_rs <- fit_resamples(
+  svm_wf,
+  incidents_folds,
+  control = controls
+)
+
+
+
+```
+
+Extracting themetrics  relevant collect_metrics() and collect_predictions() and examine the performance metrics.
+
+```{r performance}
+nb_rs_metrics <- collect_metrics(nb_rs)
+nb_rs_predictions <- collect_predictions(nb_rs)
+nb_rs_metrics
+```
+
+
+
+1. Select another classification algorithm
+
+
+```{r}
+
+```
+
+
+```{r support vector machine setup}
+
+
+```
+
+
+2. Conduct an initial out-of-the-box model fit on the training data and prediction on the test test data.  Assess the performance of this initial model. no tuning hyperparameters
+
+```{r}
+
+
+
+```
+
+
+3. Select the relevant hyperparameters for your algorithm and tune your model.
+
+```{r}
+
+
+
+```
+
+
+4. Conduct a model fit using your newly tuned model specification.  What are the terms most highly associated with non-fatal reports?  What about fatal reports? 
+
+5. Predict fatality of the reports in the test set.  Compare this prediction performance to that of the Naive Bayes and Lasso models.  
+
